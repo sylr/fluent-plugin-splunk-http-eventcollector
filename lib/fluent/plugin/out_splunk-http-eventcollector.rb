@@ -51,6 +51,8 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
   config_param :source, :string, :default => nil
   config_param :post_retry_max, :integer, :default => 5
   config_param :post_retry_interval, :integer, :default => 5
+  
+  config_param :time_format, :string, :default => 'unixtime'
 
   # TODO Find better upper limits
   config_param :batch_size_limit, :integer, :default => 262144 # 65535
@@ -72,6 +74,7 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
     log.trace "splunk-http-eventcollector(initialize) called"
     require 'net/http/persistent'
     require 'openssl'
+    require 'time'
   end  # initialize
 
   # Thanks to
@@ -116,6 +119,22 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
     @placeholder_expander = Fluent::SplunkHTTPEventcollectorOutput.placeholder_expander(log)
     @hostname = Socket.gethostname
     # TODO Add other robust input/syntax checks.
+
+    #Time
+    case @time_format
+      when 'none'
+        @time_formatter = nil
+      when 'unixtime'
+        @time_formatter = lambda { |time| time.to_s }
+      when 'localtime'
+        @time_formatter = lambda { |time| Time.at(time).localtime }
+      when 'splunk'
+        # Extract the 'time' key from the source
+        @time_formatter = "splunk"
+      else
+        @timef = TimeFormatter.new(@time_format, @localtime)
+        @time_formatter = lambda { |time| @timef.format(time) }
+    end
   end  # configure
 
   ## This method is called when starting.
@@ -158,7 +177,6 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
     placeholders = @placeholder_expander.prepare_placeholders(placeholder_values)
 
     splunk_object = Hash[
-        "time" => time.to_i,
         "source" => if @source.nil? then tag.to_s else @placeholder_expander.expand(@source, placeholders) end,
         "sourcetype" => @placeholder_expander.expand(@sourcetype.to_s, placeholders),
         "host" => @placeholder_expander.expand(@host.to_s, placeholders),
@@ -169,6 +187,16 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
       splunk_object["event"] = convert_to_utf8(record)
     else
       splunk_object["event"] = convert_to_utf8(record["message"])
+    end
+
+    # Time    
+    if @time_formatter == "splunk" and record['time']
+      # Use the regexed 'time' extracted in source
+      splunk_object["time"] = record['time']
+    else
+      if @time_formatter
+        splunk_object["time"] = "#{@time_formatter.call(time)}"
+      end
     end
 
     json_event = splunk_object.to_json
