@@ -25,6 +25,8 @@ This plugin interfaces with the Splunk HTTP Event Collector:
 
       # TIMESTAMP: key1="value1" key2="value2" ...
       time_format unixtime
+      # if your message is a json that contains the timestamp of the event
+      time_fields time,timestamp
       format kvp
 
       # Memory buffer with a short flush internal.

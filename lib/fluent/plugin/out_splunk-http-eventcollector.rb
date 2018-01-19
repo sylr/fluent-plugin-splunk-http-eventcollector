@@ -53,6 +53,7 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
   config_param :post_retry_interval, :integer, :default => 5
   
   config_param :time_format, :string, :default => 'unixtime'
+  config_param :time_fields, :string, :default => 'time,timestamp'
 
   # TODO Find better upper limits
   config_param :batch_size_limit, :integer, :default => 262144 # 65535
@@ -75,6 +76,8 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
     require 'net/http/persistent'
     require 'openssl'
     require 'time'
+    require 'json'
+    require 'date'
   end  # initialize
 
   # Thanks to
@@ -123,14 +126,13 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
     #Time
     case @time_format
       when 'none'
-        @time_formatter = nil
+        @time_formatter = lambda { |time| time }
       when 'unixtime'
         @time_formatter = lambda { |time| time.to_s }
       when 'localtime'
         @time_formatter = lambda { |time| Time.at(time).localtime }
-      when 'splunk'
-        # Extract the 'time' key from the source
-        @time_formatter = "splunk"
+      when 'iso8601'
+        @time_formatter = lambda { |time| DateTime.iso8601(time).to_time.to_f.to_s }
       else
         @timef = TimeFormatter.new(@time_format, @localtime)
         @time_formatter = lambda { |time| @timef.format(time) }
@@ -177,25 +179,46 @@ class SplunkHTTPEventcollectorOutput < BufferedOutput
     placeholders = @placeholder_expander.prepare_placeholders(placeholder_values)
 
     splunk_object = Hash[
-        "source" => if @source.nil? then tag.to_s else @placeholder_expander.expand(@source, placeholders) end,
-        "sourcetype" => @placeholder_expander.expand(@sourcetype.to_s, placeholders),
-        "host" => @placeholder_expander.expand(@host.to_s, placeholders),
-        "index" =>  @placeholder_expander.expand(@index, placeholders)
-      ]
-    # TODO: parse different source types as expected: KVP, JSON, TEXT
-    if @all_items
-      splunk_object["event"] = convert_to_utf8(record)
-    else
-      splunk_object["event"] = convert_to_utf8(record["message"])
+      "source" => if @source.nil? then tag.to_s else @placeholder_expander.expand(@source, placeholders) end,
+      "sourcetype" => @placeholder_expander.expand(@sourcetype.to_s, placeholders),
+      "host" => @placeholder_expander.expand(@host.to_s, placeholders),
+      "index" =>  @placeholder_expander.expand(@index, placeholders)
+    ]
+
+    # try to unmarshal json
+    begin
+      splunk_object["event"] = JSON.parse(record["message"])
+    rescue => exception
+      if @all_items
+        splunk_object["event"] = convert_to_utf8(record)
+      else
+        splunk_object["event"] = convert_to_utf8(record["message"])
+      end
     end
 
-    # Time    
-    if @time_formatter == "splunk" and record['time']
-      # Use the regexed 'time' extracted in source
-      splunk_object["time"] = record['time']
+    # Time fields
+    if @time_fields && splunk_object["event"].is_a?(Object)
+      @time_fields.split(",").each do |x|
+        if splunk_object["event"].key?(x)
+          begin
+            if @time_formatter
+              splunk_object["time"] = @time_formatter.call(splunk_object["event"][x])
+            else
+              splunk_object["time"] = splunk_object["event"][x]
+            end
+          rescue ArgumentError
+            log.warn "Warning: " + $!.to_s + " " + splunk_object["event"][x].to_s + " is not " + @time_format
+          end
+          break
+        end
+      end
     else
       if @time_formatter
-        splunk_object["time"] = "#{@time_formatter.call(time)}"
+        begin
+          splunk_object["time"] = "#{@time_formatter.call(time)}"
+        rescue ArgumentError
+          log.warn "Warning: " + $!.to_s + " " + time.to_s + " is not " + @time_format
+        end
       end
     end
 
